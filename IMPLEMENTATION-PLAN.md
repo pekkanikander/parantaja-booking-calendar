@@ -181,7 +181,7 @@ Operator reviews, amends if needed, then explicitly says "proceed to Stage 2".
 
 ---
 
-## Stage 2 — Local Spike
+## Stage 2 — Local Spike — Done
 
 **Goal:** A running local prototype that demonstrates the full booking flow
 end-to-end against a real Google Calendar. Not production quality — no
@@ -222,47 +222,7 @@ booking-calendar/
 
 ### 2.2 Worker implementation
 
-Implement exactly these three endpoints (TypeScript, strict mode):
-
-```
-GET  /slots?from=<ISO>&to=<ISO>
-     → { slots: Slot[] }
-     Reads OPEN events from the calendar in the date range.
-
-POST /book
-     body: { slotId: string, name: string, note?: string }
-     → { ok: true, eventId: string } | { ok: false, error: string }
-     Atomically: reads the slot, writes a BOOKED event.
-     Returns error if slot no longer exists (`OPEN` disappeared, double booking, ...).
-
-GET  /health
-     → { ok: true }
-     Smoke test.
-```
-
-Shared TypeScript types (define in `worker/src/types.ts`, import in frontend
-`types.ts` — or use a shared `packages/types` if monorepo tooling is easy):
-
-```typescript
-interface Slot {
-  id: string;          // Google Calendar event ID of the OPEN event
-  start: string;       // ISO 8601
-  end: string;         // ISO 8601
-  title: string;       // display label, e.g. "Available"
-}
-
-interface BookRequest {
-  slotId: string;
-  name: string;
-  note?: string;
-}
-
-interface BookResponse {
-  ok: boolean;
-  eventId?: string;
-  error?: string;
-}
-```
+See `SPIKE_PLAN.md`
 
 ### 2.3 Frontend implementation
 
@@ -271,7 +231,7 @@ interface BookResponse {
 - Render `OPEN` slots as clickable events in a distinct colour.
 - On slot click: show a minimal inline form (name field, optional note,
   confirm button).
-- On confirm: call `POST /book`, show success or "slot already taken" error.
+- On confirm: create event, show success or "slot already taken" error.
 - On success: remove the slot from the calendar view and show confirmation.
 - TypeScript strict mode throughout. No `any`.
 
