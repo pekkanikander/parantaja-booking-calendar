@@ -1,0 +1,13 @@
+# Stubbed — wired in Stage 3.
+# Will build the frontend with Vite and deploy to GitHub Pages,
+# and deploy the Cloudflare Worker via wrangler.
+name: Deploy
+on:
+  push:
+    branches: [main]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Stage 3 will wire up the actual deployment steps."
