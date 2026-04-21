@@ -1,0 +1,6 @@
+.claude
+node_modules/
+dist/
+worker/.dev.vars
+*.local
+.DS_Store
