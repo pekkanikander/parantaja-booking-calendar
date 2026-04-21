@@ -66,7 +66,8 @@ export default {
       let token: string;
       try {
         token = await getAccessToken(env);
-      } catch {
+      } catch (e) {
+        console.error("auth failed", e);
         return json(
           { status: "error", error: { code: "caldav_error", message: "auth failed" } },
           502, cors,
@@ -75,7 +76,8 @@ export default {
       let events;
       try {
         events = await reportEvents(env.CALDAV_CALENDAR_URL, token, start, end);
-      } catch {
+      } catch (e) {
+        console.error("caldav error", e);
         return json(
           { status: "error", error: { code: "caldav_error", message: "caldav error" } },
           502, cors,
@@ -121,7 +123,8 @@ export default {
       let token: string;
       try {
         token = await getAccessToken(env);
-      } catch {
+      } catch (e) {
+        console.error("auth failed", e);
         return json(
           { status: "error", error: { code: "caldav_error", message: "auth failed" } },
           502, cors,
@@ -150,7 +153,8 @@ export default {
       let token: string;
       try {
         token = await getAccessToken(env);
-      } catch {
+      } catch (e) {
+        console.error("auth failed", e);
         return json(
           { status: "error", error: { code: "caldav_error", message: "auth failed" } },
           502, cors,
