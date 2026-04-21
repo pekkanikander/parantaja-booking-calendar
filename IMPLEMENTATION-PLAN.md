@@ -78,8 +78,8 @@ that from browser TypeScript is impractical without a large dependency.
 
 ```
 Stage 1 — Research & Architecture   (Claude Code) — Done
-Stage 2 — Local Spike               (Claude Code + operator config)
-Stage 3 — GitHub Pages Deploy       (Claude Code + operator config)
+Stage 2 — Local Spike               (Claude Code + operator config) — Done
+Stage 3 — GitHub Pages Deploy       (Claude Code + operator config) — Done
 Stage 4 — Production / Portability  (post-spike, plan refined then)
 ```
 
@@ -229,35 +229,31 @@ Worker CORS allows `http://localhost:5173`. No Vite proxy needed.
 
 ---
 
-## Stage 3 — GitHub Pages Deploy
+## Stage 3 — GitHub Pages Deploy — Done
 
-**Goal:** Live at `https://<subdomain>.pnr.iki.fi`.
+**Goal:** Live at `https://bookings.pnr.iki.fi`.
 
-**Entry condition:** Checkpoint 2 signed off.
+### What was done
 
-### 3.1 GitHub Actions workflow
+- `.github/workflows/deploy.yml` — two-job workflow: `deploy-worker` (via
+  `cloudflare/wrangler-action`) then `deploy-pages` (Vite build →
+  `actions/deploy-pages`). `VITE_WORKER_URL` injected as a workflow env var
+  at build time; no `.env.production` file needed.
+- `frontend/public/CNAME` — `bookings.pnr.iki.fi`; Vite copies it into
+  `dist/` verbatim, GitHub Pages picks it up automatically.
+- `frontend/src/config.ts` — changed to
+  `import.meta.env.VITE_WORKER_URL ?? "http://localhost:8787"`;
+  `vite/client` added to `tsconfig.json` types to satisfy `tsc`.
+- `worker/src/index.ts` — `https://bookings.pnr.iki.fi` added to
+  `ALLOWED_ORIGINS`.
+- Worker secrets uploaded to Cloudflare via `wrangler secret put` (piped
+  from file to avoid terminal corruption of multi-line JSON).
+- GitHub repo secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`.
+- DNS: `bookings CNAME pekkanikander.github.io` at registrar.
 
-- Vite build → `frontend/dist/` → deploy via GitHub Pages action.
-- Worker deploy via `cloudflare/wrangler-action`.
-- Secrets required in repo: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`.
-- Worker secrets set via `wrangler secret put` (not stored in repo).
-- Document each secret in `docs/DEPLOY.md`.
+Operator setup details in `docs/DEPLOYMENT_SETUP.md`.
 
-### 3.2 Custom domain
-
-- `CNAME` file in `frontend/` pointing to `<subdomain>.pnr.iki.fi`.
-- DNS CNAME at registrar: `<subdomain>.pnr.iki.fi` → `<github-username>.github.io`.
-
-### 3.3 Worker CORS update
-
-- Add production origin to `ALLOWED_ORIGINS` in `index.ts`.
-- Localhost kept for dev.
-
-### 3.4 Smoke test (live)
-
-- Book a test slot end-to-end from the live URL.
-
-**Checkpoint 3** — live URL confirmed. Stage 3 closes.
+**Checkpoint 3** — live URL `https://bookings.pnr.iki.fi` confirmed. Stage 3 closed.
 
 ---
 
@@ -302,9 +298,6 @@ Worker CORS allows `http://localhost:5173`. No Vite proxy needed.
 
 Consider also the following:
 
-- Move slot computation and booking authority into the backend so the public
-  API becomes domain-shaped (`/slots`, `/book`, `/cancel`) rather than a raw
-  Google Calendar proxy.
 - After backend-owned booking exists, integrate one automation sink:
   - Windmill webhook / HTTP route for confirmation emails and follow-up tasks.
   - or n8n webhook for confirmation emails and follow-up tasks.

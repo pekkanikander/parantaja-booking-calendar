@@ -402,7 +402,7 @@ OPTIONS /*
 
 CORS headers emitted on all responses:
   Access-Control-Allow-Origin: http://localhost:5173 (dev)
-                               https://<subdomain>.pnr.iki.fi (prod)
+                               https://bookings.pnr.iki.fi (prod)
   Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS
   Access-Control-Allow-Headers: Content-Type
 ```
@@ -503,19 +503,22 @@ now runs server-side.
 
 ```text
 Worker secrets (wrangler secret put):
-  GOOGLE_SERVICE_ACCOUNT_JSON   (spike)
+  GOOGLE_SERVICE_ACCOUNT_JSON   (spike — pipe from file, do not paste interactively)
+  CALDAV_CALENDAR_URL
+  SLOT_MINUTES
   CALDAV_PASSWORD               (Stage 4 non-Google, Basic auth)
 
 Worker env vars (wrangler.toml [vars]):
-  CALDAV_CALENDAR_URL=https://...
-  CALDAV_AUTH_TYPE=service_account | basic
-  CALDAV_USERNAME=...           (Stage 4, Basic auth)
-  SLOT_MINUTES=60
-  ALLOWED_ORIGIN=https://<subdomain>.pnr.iki.fi
+  CALDAV_AUTH_TYPE=service_account | basic   (Stage 4)
+  CALDAV_USERNAME=...                        (Stage 4, Basic auth)
 
-SPA (Vite build-time, .env.production):
-  VITE_WORKER_URL=https://booking-worker.<account>.workers.dev
+SPA (Vite build-time, injected via GitHub Actions workflow env):
+  VITE_WORKER_URL=https://booking-worker.pekka-nikander.workers.dev
 ```
+
+Live URLs (Stage 3):
+  Frontend: https://bookings.pnr.iki.fi
+  Worker:   https://booking-worker.pekka-nikander.workers.dev
 
 The frontend remains responsible for adapting the simplified Cal.com-shaped responses into FullCalendar events.
 
