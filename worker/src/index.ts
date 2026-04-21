@@ -21,7 +21,7 @@ function getAccessToken(env: Env): Promise<string> {
   return Promise.reject(new Error("No auth credentials configured"));
 }
 
-const ALLOWED_ORIGINS = ["http://localhost:5173"];
+const ALLOWED_ORIGINS = ["http://localhost:5173", "https://bookings.pnr.iki.fi"];
 
 function corsHeaders(origin: string): Record<string, string> {
   const headers: Record<string, string> = {
