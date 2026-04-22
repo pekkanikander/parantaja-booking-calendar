@@ -195,9 +195,9 @@ who discovers a UID can delete legitimate bookings.
 
 Chosen mitigation (Stage 4):
 
-1. On `POST /v1/bookings`, the Worker generates a cryptographically random nonce and
-   stores its `SHA-256` hex digest in the `VEVENT`'s `X-BOOKING-HASH`
-   property before `PUT`-ing to the CalDAV server.
+1. On `POST /v1/bookings`, the Worker generates a cryptographically random 32-byte nonce and
+   stores `HMAC-SHA256(WORKER_NONCE_SECRET, nonce)` (base64url-encoded) in the `VEVENT`'s
+   `X-BOOKING-HASH` property before `PUT`-ing to the CalDAV server.
 2. The Worker returns the raw nonce to the SPA in the `POST /book` response;
    the SPA stores it in `localStorage` keyed by UID.
 3. On `DELETE /bookings/:uid`, the SPA presents the nonce. The Worker fetches

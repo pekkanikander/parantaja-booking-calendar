@@ -86,7 +86,7 @@ export function showBookingForm(
     submitBtn.textContent = "Booking…";
 
     try {
-      await postBooking({ start: slot.start, attendee: { name }, notes: note || undefined });
+      await postBooking({ slot_start: slot.start, attendee: { name }, notes: note || undefined });
     } catch (err) {
       submitBtn.disabled = false;
       cancelBtn.disabled = false;

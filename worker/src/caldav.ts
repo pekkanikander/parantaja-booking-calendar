@@ -32,6 +32,7 @@ export function buildVEvent(
   end: string,
   name: string,
   notes: string,
+  bookingHash?: string,
 ): string {
   const dtstart = toCalDAVDate(new Date(start).toISOString());
   const dtend   = toCalDAVDate(new Date(end).toISOString());
@@ -46,6 +47,7 @@ export function buildVEvent(
     `SUMMARY:${name}`,
   ];
   if (notes) lines.push(`DESCRIPTION:${notes}`);
+  if (bookingHash) lines.push(`X-BOOKING-HASH:${bookingHash}`);
   lines.push("END:VEVENT", "END:VCALENDAR");
   return lines.join("\r\n");
 }
@@ -136,4 +138,30 @@ export async function deleteEvent(
     throw new Error(`CalDAV DELETE failed: ${resp.status}`);
   }
   return true;
+}
+
+export async function getEvent(
+  calendarUrl: string,
+  token: string,
+  uid: string,
+): Promise<string | null> {
+  const url = `${calendarUrl.replace(/\/$/, "")}/${uid}.ics`;
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (resp.status === 404) return null;
+  if (!resp.ok) throw new Error(`CalDAV GET failed: ${resp.status}`);
+  return resp.text();
+}
+
+export function extractBookingHash(icsString: string): string | null {
+  const jcal = ICAL.parse(icsString);
+  const comp = new ICAL.Component(jcal);
+  const vevent = comp.getFirstSubcomponent("vevent");
+  if (!vevent) return null;
+  const value = vevent.getFirstPropertyValue("x-booking-hash") as string | null;
+  if (value !== null) return value;
+  // Fallback for implementations that don't surface X- properties via getFirstPropertyValue
+  const prop = vevent.getFirstProperty("x-booking-hash");
+  return prop ? (prop.getFirstValue() as string) : null;
 }

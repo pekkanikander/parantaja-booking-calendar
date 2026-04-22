@@ -4,7 +4,7 @@ export interface Slot {
 }
 
 export interface BookRequest {
-  start: string;
+  slot_start: string;
   attendee: { name: string; email?: string };
   notes?: string;
 }
@@ -13,4 +13,5 @@ export interface BookResponse {
   uid: string;
   start: string;
   end: string;
+  cancellation_nonce: string;
 }

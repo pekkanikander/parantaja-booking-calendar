@@ -1,3 +1,14 @@
 name = "booking-worker"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
+
+[vars]
+SLOT_MINUTES          = "30"
+PUZZLE_DIFFICULTY     = "10"
+PUZZLE_WINDOW_SECONDS = "30"
+
+# Rate limit parameters are baked into the binding; edit and redeploy to change.
+[[rate_limiting]]
+binding      = "BOOKING_RL"
+namespace_id = "1"
+simple       = { limit = 5, period = 60 }

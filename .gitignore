@@ -2,6 +2,7 @@
 node_modules/
 dist/
 worker/.dev.vars
+worker/.wrangler/
 archive/*/worker/.dev.vars
 *.local
 .DS_Store
