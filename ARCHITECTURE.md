@@ -2,7 +2,7 @@
 
 > Produced at end of Stage 1. Supersedes the archived Google REST API version
 > at `archive/spike-google-calendar/ARCHITECTURE.md`.
-> Revise when stage findings change any decision.
+> Revised at end of Stage 4. Revise when stage findings change any decision.
 
 A brief note on longer-term direction is provided in §10. The current architecture is intentionally minimal and pragmatic, but it is also positioned as a small step toward a more direct, capability-oriented web architecture where browser clients could interact with services without intermediary shims.
 
@@ -94,18 +94,27 @@ The SPA speaks JSON and has no knowledge of CalDAV.
 
 1. Customer clicks a slot; a minimal inline form appears (name, optional note,
    confirm button).
-2. SPA calls `POST /v1/bookings` with a Cal.com-inspired but reduced JSON body such as `{start, attendee: {name, email}, notes}`.
-3. Worker:
-   a. Generates a UUID as the event UID.
-   b. Builds a `VEVENT` iCal string (see §4).
-   c. Issues a CalDAV `PUT` to `{calendarUrl}/{uid}.ics`.
-   d. Issues a CalDAV `REPORT` for the same time window to check for
+2. Before submitting, the SPA fetches a proof-of-work challenge from
+   `GET /v1/challenge` and solves it in a dedicated Web Worker thread (see §3a).
+3. SPA calls `POST /v1/bookings` with body
+   `{slot_start, attendee: {name, email?}, notes?, puzzle_nonce, puzzle_solution}`.
+4. Worker:
+   a. Checks IP rate limit (Cloudflare built-in binding).
+   b. Validates all input fields; returns `400 Problem Details` on any failure.
+   c. Verifies the puzzle solution (SHA-256 leading zeros), then the nonce HMAC.
+   d. Generates a UUID as the event UID.
+   e. Generates a 32-byte random cancellation nonce; computes
+      `HMAC-SHA256(WORKER_NONCE_SECRET, nonce)` and stores it as
+      `X-BOOKING-HASH` in the VEVENT.
+   f. Builds the `VEVENT` iCal string and issues a CalDAV `PUT`.
+   g. Issues a CalDAV `REPORT` for the same time window to check for
       conflicts (any non-OPEN event other than the just-created one).
-   e. If conflict: issues `DELETE` for the just-created event; returns
-      `409 Conflict`.
-   f. If no conflict: returns `200` with a Cal.com-shaped but reduced success object such as `{status: "success", data: {uid, start, end}}`.
-4. SPA receives response:
-   - Success: shows booked slot at FullCalendar view; shows confirmation.
+   h. If conflict: issues `DELETE` for the just-created event; returns `409`.
+   i. If no conflict: returns `200` with
+      `{status: "success", data: {uid, start, end, cancellation_nonce}}`.
+5. SPA receives response:
+   - Success: removes slot from calendar view, shows confirmation, stores
+     `cancellation_nonce` in `localStorage` keyed by `uid`.
    - Conflict (409): shows "slot just taken" message; re-fetches slots.
 
 ### OPEN event lifecycle
@@ -153,11 +162,10 @@ For non-Google CalDAV servers:
 - **Nextcloud**: operator creates an app password in Nextcloud settings;
   Worker uses HTTP Basic auth (`Authorization: Basic base64(user:apppassword)`).
 - **Baïkal / Radicale**: HTTP Basic auth with the configured credentials.
-- **OAuth2** (future): Nextcloud supports OAuth2; integration deferred to
-  Stage 4.
+- **OAuth2** (future): Nextcloud supports OAuth2; deferred to Stage 6.
 
-The `auth.ts` module will be extended in Stage 4 to support Basic auth as an
-alternative to the service account JWT flow, selected by a Worker env var.
+Basic auth support in `auth.ts` is deferred to Stage 6, when non-Google CalDAV
+servers are tested.
 
 ### 3a. Security analysis
 
@@ -180,33 +188,62 @@ Reading booked event details (customer names, notes) is no longer possible
 through the Worker API, which eliminates the PII exposure present in the
 transparent proxy.
 
-#### Fake booking creation
+#### Fake booking creation — mitigations implemented in Stage 4
 
-`POST /v1/bookings` is public. An attacker can submit arbitrary bookable
-times within an OPEN window to occupy slots. Mitigation: rate limiting on
-`POST /v1/bookings` (deferred to Stage 4). The fake bookings are visible to
-the operator in their calendar client, so the attack is not silent.
+Two independent layers now defend against slot-squatting:
 
-#### Booking deletion — nonce mitigation (Stage 4)
+**Rate limiting**: Cloudflare's built-in rate-limit binding caps `POST /v1/bookings`
+at 5 requests per 60-second window per IP. Parameters are in `wrangler.toml`
+`[[rate_limiting]]` and take effect on redeploy.
 
-The Worker must be able to delete a booking it just created (conflict
-rollback). Exposing `DELETE /bookings/:uid` with no gate means an attacker
-who discovers a UID can delete legitimate bookings.
+**Proof-of-work puzzle**: Before submitting a booking, the browser must fetch a
+challenge from `GET /v1/challenge` and find a uint32 `solution` such that
+`SHA-256(nonce + ":" + slot_start + ":" + solution)` has ≥ 10 leading zero bits.
+The `slot_start` binding prevents reuse of a solved puzzle across different slots.
 
-Chosen mitigation (Stage 4):
+Challenge nonce structure (stateless, no KV):
+```
+random_bytes  = 16 random bytes
+window_id     = floor(unix_seconds / PUZZLE_WINDOW_SECONDS)
+nonce         = base64url(random_bytes || HMAC-SHA256(WORKER_PUZZLE_SECRET, random_bytes || encode_u64_be(window_id)))
+```
+48 bytes total → 64 base64url characters. The Worker accepts the current and
+immediately preceding window (~60 s validity). Parameters `PUZZLE_DIFFICULTY`
+and `PUZZLE_WINDOW_SECONDS` are in `wrangler.toml [vars]`.
 
-1. On `POST /v1/bookings`, the Worker generates a cryptographically random 32-byte nonce and
-   stores `HMAC-SHA256(WORKER_NONCE_SECRET, nonce)` (base64url-encoded) in the `VEVENT`'s
-   `X-BOOKING-HASH` property before `PUT`-ing to the CalDAV server.
-2. The Worker returns the raw nonce to the SPA in the `POST /book` response;
-   the SPA stores it in `localStorage` keyed by UID.
-3. On `DELETE /bookings/:uid`, the SPA presents the nonce. The Worker fetches
-   the event, recomputes the hash, and only proxies the `DELETE` if they match.
+Solving runs in a browser dedicated Web Worker thread (`puzzle.worker.ts`) so
+the main thread remains responsive. At difficulty 10 (~1024 iterations), solving
+takes < 50 ms; this is not a UX burden but is a meaningful barrier to scripted
+bulk attacks. Replay within a window is tolerated; rate limiting provides the
+residual bound.
 
-This costs one extra CalDAV `GET` per deletion. It means a booking can only
-be deleted (via the Worker) from the browser session that created it.
-Operator-side deletion via the CalDAV client (Calendar.app, etc.) is always
-available.
+The puzzle is verified on the Worker in cheapest-first order: input validation
+(sync) → SHA-256 solution check → HMAC-SHA256 nonce check.
+
+#### Booking deletion — nonce protection implemented in Stage 4
+
+The Worker must be able to delete a booking it just created (conflict rollback).
+Exposing `DELETE /bookings/:uid` with no gate means anyone who discovers a UID
+can delete a legitimate booking.
+
+Implemented mitigation:
+
+1. On `POST /v1/bookings`, the Worker generates a 32-byte cryptographically random
+   nonce and stores `HMAC-SHA256(WORKER_NONCE_SECRET, nonce)` (base64url) in the
+   `VEVENT` as `X-BOOKING-HASH` before issuing the CalDAV `PUT`.
+2. The raw nonce is returned to the SPA as `cancellation_nonce` in the response
+   and stored in `localStorage` keyed by `uid`.
+3. `DELETE /v1/bookings/:uid` requires a JSON body `{ "nonce": "..." }`. The Worker
+   fetches the event via `GET`, recomputes the HMAC using `WORKER_NONCE_SECRET`,
+   and compares with timing-safe equality. Mismatch → 403.
+
+HMAC is used rather than plain SHA-256 so that a party with CalDAV read access
+cannot build a preimage table without knowing `WORKER_NONCE_SECRET`.
+
+Cost: one extra CalDAV `GET` per customer-initiated cancellation. A booking can
+only be cancelled via the Worker from the browser session that created it.
+Operator-side deletion through any CalDAV client is always available and
+unaffected.
 
 ---
 
@@ -257,11 +294,16 @@ DTSTART:{YYYYMMDDTHHmmssZ}
 DTEND:{YYYYMMDDTHHmmssZ}
 SUMMARY:{customer name}
 DESCRIPTION:{note}
+X-BOOKING-HASH:{base64url of HMAC-SHA256(WORKER_NONCE_SECRET, cancellation_nonce_bytes)}
 END:VEVENT
 END:VCALENDAR
 ```
 
 Response: `201 Created` (new event) or `204 No Content` (overwrite).
+
+`X-BOOKING-HASH` is a private `X-` property; it is never returned to clients
+through the Worker API and is only accessed by the Worker on `DELETE` to verify
+the cancellation nonce.
 
 ### Delete event — `DELETE`
 
@@ -370,32 +412,60 @@ It now runs in the Worker rather than the SPA.
 
 ## 6. Worker Domain API
 
+All error responses use RFC 9457 Problem Details with
+`Content-Type: application/problem+json`:
+
+```json
+{ "type": "about:blank", "status": 400, "title": "Bad Request", "detail": "..." }
+```
+
 ```text
+GET /v1/challenge
+  200: { "nonce": string, "difficulty": number, "expires_at": ISO8601 }
+  — No auth required. Challenge valid for current + preceding 30-second window
+    (~60 s total). Must be solved before POST /v1/bookings.
+
 GET /v1/slots?start={ISO8601}&end={ISO8601}
   200: {
-         status: "success",
-         data: {
-           slots: {
-             "YYYY-MM-DD": [{start: string, end: string, available: boolean}]
+         "status": "success",
+         "data": {
+           "slots": {
+             "YYYY-MM-DD": [{"start": string, "end": string}]
            }
          }
        }
-  400: {status: "error", error: {code: "bad_request", message: "missing start/end"}}
-  502: {status: "error", error: {code: "caldav_error", message: "caldav error"}}
+  400: Problem Details — missing start/end
+  502: Problem Details — CalDAV or auth failure
 
 POST /v1/bookings
   Body: {
-          start: string,
-          attendee: {name: string, email?: string},
-          notes?: string
-        }
-  200: {status: "success", data: {uid: string, start: string, end: string}}
-  409: {status: "error", error: {code: "conflict", message: "slot taken"}}
-  400: {status: "error", error: {code: "bad_request", message: "invalid body"}}
+    "slot_start":       string,         // UTC ISO 8601, e.g. "2026-04-22T10:00:00.000Z"
+    "attendee":         { "name": string (≤200), "email"?: string },
+    "notes"?:           string (≤1000),
+    "puzzle_nonce":     string,         // 64 base64url chars from GET /v1/challenge
+    "puzzle_solution":  number          // uint32 satisfying the PoW condition
+  }
+  200: {
+    "status": "success",
+    "data": {
+      "uid":                string,
+      "start":              string,
+      "end":                string,
+      "cancellation_nonce": string      // 43 base64url chars; store for DELETE
+    }
+  }
+  400: Problem Details — validation failure, puzzle wrong, or nonce expired
+  409: Problem Details — slot taken
+  429: Problem Details — rate limit exceeded
+  502: Problem Details — CalDAV or auth failure
 
 DELETE /v1/bookings/:uid
-  204: (no body)
-  404: {status: "error", error: {code: "not_found", message: "not found"}}
+  Body: { "nonce": string }   // cancellation_nonce returned by POST
+  204: (no body) — success
+  400: Problem Details — missing or malformed nonce
+  403: Problem Details — nonce does not match stored hash
+  404: Problem Details — booking not found
+  502: Problem Details — CalDAV or auth failure
 
 OPTIONS /*
   204: CORS preflight
@@ -407,7 +477,7 @@ CORS headers emitted on all responses:
   Access-Control-Allow-Headers: Content-Type
 ```
 
-All other methods and paths return `405` or `404`.
+All other methods and paths return `405` or `404` Problem Details.
 
 ---
 
@@ -463,64 +533,85 @@ The CalDAV `PUT` is not atomic relative to a concurrent `PUT` from another
 session. The Worker's check-after-insert strategy (same as the archived spike)
 handles this at the application level.
 
-Race window: narrow for a low-traffic single-operator calendar. Accepted for
-the spike and Stage 3. Stage 4 can introduce a Cloudflare Durable Object
-per-slot lock if traffic warrants it.
+Race window: narrow for a low-traffic single-operator calendar. Accepted through
+Stage 4. A Cloudflare Durable Object per-slot lock can be introduced if traffic
+warrants it (Stage 6 candidate).
 
 Note: Google CalDAV ignores `If-None-Match: *` on `PUT` (see §4 deviations),
 so optimistic concurrency control via ETags is not available on Google.
 Standard CalDAV servers (Nextcloud, Baïkal) do honour it; this may be used
-in Stage 4.
+in Stage 6.
 
 ---
 
 ## 9. Configuration Surface
 
-### Spike (local dev)
+### Local dev — `worker/.dev.vars` (gitignored)
 
 ```text
-Worker — worker/.dev.vars (gitignored):
-  # Method 1 — service account (preferred; used when present)
-  GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account","client_email":"...","private_key":"..."}
+# Google auth — Method 1: service account (preferred)
+GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account","client_email":"...","private_key":"..."}
 
-  # Method 2 — user OAuth refresh token (fallback)
-  GOOGLE_CLIENT_ID=...
-  GOOGLE_CLIENT_SECRET=...
-  GOOGLE_REFRESH_TOKEN=...
+# Google auth — Method 2: OAuth refresh token (fallback)
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+GOOGLE_REFRESH_TOKEN=...
 
-  # Shared
-  CALDAV_CALENDAR_URL=https://apidata.googleusercontent.com/caldav/v2/{calId}/events/
-  SLOT_MINUTES=30
-
-SPA — hardcoded in frontend/src/config.ts:
-  export const WORKER_URL = "http://localhost:8787";
+# Shared secrets
+CALDAV_CALENDAR_URL=https://apidata.googleusercontent.com/caldav/v2/{calId}/events/
+WORKER_NONCE_SECRET=<openssl rand -base64 32>
+WORKER_PUZZLE_SECRET=<openssl rand -base64 32>
 ```
 
-`SLOT_MINUTES` has moved from the SPA to the Worker because slot computation
-now runs server-side.
+`SLOT_MINUTES`, `PUZZLE_DIFFICULTY`, and `PUZZLE_WINDOW_SECONDS` are set in
+`worker/wrangler.toml [vars]` and are picked up automatically by `wrangler dev`.
 
-### Stage 3+ (production)
+### Production — secrets (`wrangler secret put`)
 
 ```text
-Worker secrets (wrangler secret put):
-  GOOGLE_SERVICE_ACCOUNT_JSON   (spike — pipe from file, do not paste interactively)
-  CALDAV_CALENDAR_URL
-  SLOT_MINUTES
-  CALDAV_PASSWORD               (Stage 4 non-Google, Basic auth)
-
-Worker env vars (wrangler.toml [vars]):
-  CALDAV_AUTH_TYPE=service_account | basic   (Stage 4)
-  CALDAV_USERNAME=...                        (Stage 4, Basic auth)
-
-SPA (Vite build-time, injected via GitHub Actions workflow env):
-  VITE_WORKER_URL=https://booking-worker.pekka-nikander.workers.dev
+GOOGLE_SERVICE_ACCOUNT_JSON   (pipe from file — do not paste interactively)
+CALDAV_CALENDAR_URL
+WORKER_NONCE_SECRET
+WORKER_PUZZLE_SECRET
 ```
 
-Live URLs (Stage 3):
-  Frontend: https://bookings.pnr.iki.fi
-  Worker:   https://booking-worker.pekka-nikander.workers.dev
+Rotating `WORKER_NONCE_SECRET` invalidates all existing `cancellation_nonce`
+values stored in customers' `localStorage`; outstanding bookings can still be
+cancelled by the operator via their CalDAV client.
 
-The frontend remains responsible for adapting the simplified Cal.com-shaped responses into FullCalendar events.
+### Production — `wrangler.toml [vars]` (committed, visible)
+
+```toml
+[vars]
+SLOT_MINUTES          = "30"
+PUZZLE_DIFFICULTY     = "10"
+PUZZLE_WINDOW_SECONDS = "30"
+
+[[rate_limiting]]
+binding      = "BOOKING_RL"
+namespace_id = "1"
+simple       = { limit = 5, period = 60 }
+```
+
+Rate limit parameters are baked into the binding at deploy time; edit and
+redeploy to change them. The `BOOKING_RL` binding is absent in `wrangler dev`;
+the Worker skips rate limiting locally.
+
+### SPA (Vite build-time)
+
+```text
+VITE_WORKER_URL=https://booking-worker.pekka-nikander.workers.dev
+```
+
+Injected via GitHub Actions workflow env at build time. Falls back to
+`http://localhost:8787` when the env var is unset (local dev).
+
+### Live URLs (Stage 4)
+
+```text
+Frontend: https://bookings.pnr.iki.fi
+Worker:   https://booking-worker.pekka-nikander.workers.dev
+```
 
 ---
 
