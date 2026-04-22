@@ -16,7 +16,7 @@ interface Env {
   WORKER_PUZZLE_SECRET: string;
   PUZZLE_DIFFICULTY: string;
   PUZZLE_WINDOW_SECONDS: string;
-  BOOKING_RL: RateLimit;
+  BOOKING_RL?: RateLimit;  // absent in wrangler dev; rate limiting is skipped locally
 }
 
 function getAccessToken(env: Env): Promise<string> {
@@ -49,12 +49,28 @@ function json(body: unknown, status: number, cors: Record<string, string>): Resp
   });
 }
 
+function checkEnv(env: Env): string | null {
+  if (!env.CALDAV_CALENDAR_URL)   return "CALDAV_CALENDAR_URL is not set";
+  if (!env.WORKER_NONCE_SECRET)   return "WORKER_NONCE_SECRET is not set";
+  if (!env.WORKER_PUZZLE_SECRET)  return "WORKER_PUZZLE_SECRET is not set";
+  const hasServiceAccount = !!env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  const hasOAuth = !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.GOOGLE_REFRESH_TOKEN);
+  if (!hasServiceAccount && !hasOAuth) return "No Google auth credentials configured";
+  return null;
+}
+
 const SLOT_START_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const origin = request.headers.get("Origin") ?? "";
     const cors = corsHeaders(origin);
+
+    const envError = checkEnv(env);
+    if (envError) {
+      console.error("Worker misconfigured:", envError);
+      return problem(500, "Internal Server Error", "Worker is misconfigured; check secrets.", cors);
+    }
 
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: cors });
@@ -104,11 +120,13 @@ export default {
 
     // POST /v1/bookings
     if (request.method === "POST" && path === "/v1/bookings") {
-      const { success } = await env.BOOKING_RL.limit({
-        key: request.headers.get("CF-Connecting-IP") ?? "unknown",
-      });
-      if (!success) {
-        return problem(429, "Too Many Requests", "Rate limit exceeded; try again later.", cors);
+      if (env.BOOKING_RL) {
+        const { success } = await env.BOOKING_RL.limit({
+          key: request.headers.get("CF-Connecting-IP") ?? "unknown",
+        });
+        if (!success) {
+          return problem(429, "Too Many Requests", "Rate limit exceeded; try again later.", cors);
+        }
       }
 
       let body: {

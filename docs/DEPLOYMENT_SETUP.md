@@ -54,14 +54,31 @@ Settings → Secrets and variables → Actions → New repository secret
 
 ### 3.3 Set worker secrets
 
-These are the runtime environment variables for the deployed worker.
-Run from `worker/` on your local machine (requires `wrangler login` first — see §4).
+These are runtime credentials and keys for the deployed worker.
+Run from `worker/` on your local machine (requires `wrangler login` first — see §4.1).
 
 ```sh
 cd worker
-npx wrangler secret put CALDAV_CALENDAR_URL
-npx wrangler secret put SLOT_MINUTES
 ```
+
+**Calendar URL** (contains your calendar ID — treated as a secret):
+
+```sh
+npx wrangler secret put CALDAV_CALENDAR_URL
+# Paste: https://apidata.googleusercontent.com/caldav/v2/<calId>/events/
+# where <calId> is your URL-encoded calendar ID (e.g. user%40gmail.com for user@gmail.com)
+```
+
+**Security secrets** (generate fresh random values for each deployment):
+
+```sh
+# Generate and upload in one step — never store these values anywhere
+openssl rand -base64 32 | npx wrangler secret put WORKER_NONCE_SECRET
+openssl rand -base64 32 | npx wrangler secret put WORKER_PUZZLE_SECRET
+```
+
+`WORKER_NONCE_SECRET` — used to HMAC-sign cancellation nonces stored in booking events.  
+`WORKER_PUZZLE_SECRET` — used to HMAC-sign proof-of-work challenges issued to browsers.
 
 Then whichever Google auth flow you use:
 
@@ -84,7 +101,8 @@ for line in open('worker/.dev.vars'):
 " | npx wrangler secret put GOOGLE_SERVICE_ACCOUNT_JSON
 ```
 
-**OAuth refresh token:**
+**OAuth refresh token (fallback):**
+
 ```sh
 npx wrangler secret put GOOGLE_CLIENT_ID
 npx wrangler secret put GOOGLE_CLIENT_SECRET
@@ -94,11 +112,27 @@ npx wrangler secret put GOOGLE_REFRESH_TOKEN
 The values are stored encrypted in Cloudflare's vault and injected into the worker at runtime.
 
 To verify (values are never shown):
+
 ```sh
 npx wrangler secret list
 ```
 
 Secrets persist across deployments — they do not need to be re-set when code is pushed.
+
+### 3.4 Non-secret configuration
+
+The following values are set in `worker/wrangler.toml` under `[vars]` and are
+visible in the repository. Edit the file and push to change them:
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `SLOT_MINUTES` | `30` | Bookable slot duration in minutes |
+| `PUZZLE_DIFFICULTY` | `10` | Leading zero bits required in the proof-of-work solution |
+| `PUZZLE_WINDOW_SECONDS` | `30` | Duration of each PoW challenge time window; a challenge is accepted for the current window plus the preceding one (~60 s total validity) |
+
+The rate limit for `POST /v1/bookings` (default: 5 requests per 60 seconds per IP) is
+configured in the `[[rate_limiting]]` block in `wrangler.toml`. It is baked into the
+binding at deploy time; edit and redeploy to change it.
 
 ---
 
@@ -119,16 +153,23 @@ This opens a browser window to authorise Wrangler. The session token is saved to
 ### 4.2 Local credentials (.dev.vars)
 
 The file `worker/.dev.vars` holds credentials for local development only.
-It is gitignored and never committed. Format:
+It is gitignored and never committed. Create it with:
 
 ```
-CALDAV_CALENDAR_URL=https://apidata.googleusercontent.com/caldav/v2/...
-SLOT_MINUTES=30
+CALDAV_CALENDAR_URL=https://apidata.googleusercontent.com/caldav/v2/<calId>/events/
 GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
+
+WORKER_NONCE_SECRET=<output of: openssl rand -base64 32>
+WORKER_PUZZLE_SECRET=<output of: openssl rand -base64 32>
 ```
+
+For local dev the security secrets can be any stable random string — they just need
+to be present. The `SLOT_MINUTES`, `PUZZLE_DIFFICULTY`, and `PUZZLE_WINDOW_SECONDS`
+variables are read from `wrangler.toml` by `wrangler dev` automatically; no need to
+duplicate them in `.dev.vars`.
 
 These values are only used by `wrangler dev`. The deployed worker uses the secrets
-set in §3.3.
+set in §3.3 and the vars set in §3.4.
 
 ---
 
@@ -138,6 +179,9 @@ set in §3.3.
 |------|---------|
 | Deploy | Push to `main` — Actions handles everything |
 | Tail live logs | `cd worker && npx wrangler tail` |
-| Update a secret | `npx wrangler secret put <NAME>` |
-| List secrets | `npx wrangler secret list` |
-| Local dev | `cd worker && npm run dev` + `cd frontend && npm run dev` |
+| Update a secret | `cd worker && npx wrangler secret put <NAME>` |
+| List secrets | `cd worker && npx wrangler secret list` |
+| Rotate security secrets | Re-run the `openssl rand … \| wrangler secret put` commands from §3.3; existing bookings' cancellation nonces will be invalidated |
+| Change slot duration / puzzle params | Edit `worker/wrangler.toml` `[vars]`, push to `main` |
+| Change rate limit | Edit `worker/wrangler.toml` `[[rate_limiting]]`, push to `main` |
+| Local dev | `cd worker && npx wrangler dev` + `cd frontend && npm run dev` |

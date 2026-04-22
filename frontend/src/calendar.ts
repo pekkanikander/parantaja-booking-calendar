@@ -47,7 +47,9 @@ export function initCalendar(
       }
     },
     eventClick: info => {
-      onSlotClick({ start: info.event.startStr, end: info.event.endStr });
+      const start = info.event.start?.toISOString() ?? info.event.startStr;
+      const end   = info.event.end?.toISOString()   ?? info.event.endStr;
+      onSlotClick({ start, end });
     },
   });
 
