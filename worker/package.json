@@ -8,7 +8,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "ical.js": "^2.1.0"
+    "ical.js": "^2.1.0",
+    "jose": "^5.0.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250109.0",

@@ -6,6 +6,7 @@ compatibility_date = "2025-01-01"
 SLOT_MINUTES          = "30"
 PUZZLE_DIFFICULTY     = "10"
 PUZZLE_WINDOW_SECONDS = "30"
+DPOP_WINDOW_SECONDS   = "30"
 
 # Rate limit parameters are baked into the binding; edit and redeploy to change.
 [[rate_limiting]]
