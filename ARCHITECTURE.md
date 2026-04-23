@@ -2,7 +2,7 @@
 
 > Produced at end of Stage 1. Supersedes the archived Google REST API version
 > at `archive/spike-google-calendar/ARCHITECTURE.md`.
-> Revised at end of Stage 4. Revise when stage findings change any decision.
+> Revised at end of Stages 4 and 5. Revise when stage findings change any decision.
 
 A brief note on longer-term direction is provided in §10. The current architecture is intentionally minimal and pragmatic, but it is also positioned as a small step toward a more direct, capability-oriented web architecture where browser clients could interact with services without intermediary shims.
 
@@ -29,21 +29,23 @@ A brief note on longer-term direction is provided in §10. The current architect
                                             ▲
                                             │ CalDAV (HTTPS)
                                             ▼
-┌─────────────────────────────┐    ┌────────────────────────┐
-│  GitHub Pages               │    │  Cloudflare Worker     │
-│  (static SPA)               │    │  (domain API)          │
-│                             │    │                        │
-│  FullCalendar timeGridWeek  │    │  GET  /v1/slots        │
-│  Booking form               │◄──►│  POST /v1/bookings     │
-│  api.ts (JSON only)         │    │  DELETE /v1/bookings/:uid │
-│                             │    │                        │
-│                             │    │  Internally:           │
-│                             │    │  • auth (JWT→token)    │
-│                             │    │  • CalDAV REPORT/PUT/  │
-│                             │    │    DELETE              │
-│                             │    │  • ical.js parsing     │
-│                             │    │  • slot computation    │
-└─────────────────────────────┘    └────────────────────────┘
+┌──────────────────────────────────┐    ┌────────────────────────────┐
+│  GitHub Pages                    │    │  Cloudflare Worker         │
+│  (static SPA)                    │    │  (domain API)              │
+│                                  │    │                            │
+│  Service Worker (sw.ts)          │    │  GET  /v1/challenge        │
+│  • P-256 key pair in IndexedDB   │    │  GET  /v1/slots            │
+│  • intercepts all Worker fetches │    │  POST /v1/bookings         │
+│  • attaches DPoP proof header    │    │  DELETE /v1/bookings/:uid  │
+│                                  │    │                            │
+│  FullCalendar timeGridWeek  ◄────┼──► │  Internally:              │
+│  Booking form                    │    │  • DPoP proof validation   │
+│  api.ts (JSON only)              │    │  • auth (JWT→token)        │
+│                                  │    │  • CalDAV REPORT/PUT/      │
+│                                  │    │    DELETE                  │
+│                                  │    │  • ical.js parsing         │
+│                                  │    │  • slot computation        │
+└──────────────────────────────────┘    └────────────────────────────┘
 ```
 
 The Worker is no longer a transparent proxy, as it was in the archived first spike.
@@ -66,8 +68,12 @@ The SPA speaks JSON and has no knowledge of CalDAV.
 
 ### Customer views available slots
 
-1. Browser loads the SPA from GitHub Pages.
+1. Browser loads the SPA from GitHub Pages. On first load, `main.ts` waits for
+   the Service Worker (`sw.js`) to activate and claim the page before proceeding.
+   On warm loads the SW is already active; the wait resolves instantly.
 2. SPA calls `GET /v1/slots?start={ISO8601}&end={ISO8601}` on the Worker.
+   The Service Worker intercepts the fetch, signs a DPoP proof with the
+   session key pair, and attaches it as the `DPoP` request header.
 3. Worker:
    a. Obtains (or returns cached) access token.
    b. Issues a CalDAV `REPORT` with a `calendar-query` and `time-range`
@@ -88,15 +94,17 @@ The SPA speaks JSON and has no knowledge of CalDAV.
        }
      }
    }
-4. SPA renders available slots as clickable green events in FullCalendar. Booked slots are simply omitted from the response rather than returned as red items.
+4. SPA renders available slots as clickable green events in FullCalendar. 
+   At this moment, booked slots are simply omitted from the response rather than shown as red items.
 
 ### Customer books a slot
 
 1. Customer clicks a slot; a minimal inline form appears (name, optional note,
    confirm button).
 2. Before submitting, the SPA fetches a proof-of-work challenge from
-   `GET /v1/challenge` and solves it in a dedicated Web Worker thread (see §3a).
-3. SPA calls `POST /v1/bookings` with body
+   `GET /v1/challenge` (SW intercepts and attaches DPoP proof) and solves it in a
+   dedicated Web Worker thread (see §3a).
+3. SPA calls `POST /v1/bookings` (SW intercepts and attaches DPoP proof) with body
    `{slot_start, attendee: {name, email?}, notes?, puzzle_nonce, puzzle_solution}`.
 4. Worker:
    a. Checks IP rate limit (Cloudflare built-in binding).
@@ -244,6 +252,65 @@ Cost: one extra CalDAV `GET` per customer-initiated cancellation. A booking can
 only be cancelled via the Worker from the browser session that created it.
 Operator-side deletion through any CalDAV client is always available and
 unaffected.
+
+#### DPoP proof-of-key-possession — implemented in Stage 5
+
+Every browser session generates a non-extractable EC P-256 key pair on first
+Service Worker activation and persists it in IndexedDB. The Service Worker
+intercepts all fetches to the Worker origin and attaches a `DPoP` JWT header
+to each request, signed with the session private key.
+
+The `DPoP` JWT structure follows RFC 9449:
+```
+Header: { alg: "ES256", typ: "dpop+jwt", jwk: <public key> }
+Payload: { jti: <uuid>, htm: <method>, htu: <url>, iat: <now> [, nonce: <nonce>] }
+Signed with the session private key (ECDSA P-256).
+```
+
+There is no OAuth access token in this architecture version; 
+DPoP degrades to a signed proof-of-key-possession. The `ath` claim is omitted. 
+The immediate security value is modest (any browser can generate a key pair), 
+but it adds a per-request asymmetric signing cost and 
+creates a defined slot for future device attestation.
+
+**DPoP-Nonce (stateless):** The Worker includes a `DPoP-Nonce` header in every
+response, generated with the same HMAC-over-time-window scheme used for PoW
+challenge nonces (secret: `WORKER_DPOP_SECRET`, window: `DPOP_WINDOW_SECONDS`).
+The Service Worker at the browser caches the most recently received nonce and includes 
+it in the `nonce` claim of subsequent proofs. The Worker verifies the nonce using
+dual-window HMAC validation (current and preceding window, same pattern as PoW).
+
+**Policy by request type:**
+- GET requests: DPoP proof optional on first page load (Service Worker maybe not yet
+  active). Once the SW has received a `DPoP-Nonce`, subsequent GET proofs must
+  include a valid nonce. (Unclear if this is actually enforced in the implementation.)
+- POST and DELETE: DPoP proof with valid nonce is always required.
+- Missing or malformed proof on a required path → `401` with
+  `WWW-Authenticate: DPoP` and a fresh `DPoP-Nonce`.
+
+**`jti` uniqueness:** The `jti` claim is included in each proof (spec compliance
+and future enforcement hook), but uniqueness is not checked — a stateless
+Cloudflare Worker has nowhere to store seen jtis without KV. Replay resistance
+relies on `iat` freshness (60 s `maxTokenAge`) and nonce rotation (30 s window).
+This is an explicit, documented choice at the current threat level.
+
+**Implementation notes:**
+
+*Non-extractable private key with accessible public JWK:*
+Web Crypto's `extractable: false` flag prevents `exportKey()` on both keys
+in a generated pair. Yet DPoP proofs must embed the public key as JWK in the
+JOSE header. Workaround: generate with `extractable: true`, export the public JWK
+once, then re-import the private key bytes with `extractable: false`. The raw
+private JWK material exists in memory only during this one-time initialisation.
+
+*`panva/jose` on the Worker; no external library on the frontend:*
+The Worker uses `jose` (`jwtVerify` + `EmbeddedJWK`) to validate incoming DPoP
+proofs. The Service Worker builds proofs with raw Web Crypto (the JWT structure
+is simple enough not to warrant a frontend dependency).
+
+*CORS:* Adding `DPoP` to cross-origin requests triggers CORS preflights.
+`Access-Control-Allow-Headers` includes `DPoP`; `Access-Control-Expose-Headers`
+includes `DPoP-Nonce` so the Service Worker can read it from responses.
 
 ---
 
@@ -422,8 +489,10 @@ All error responses use RFC 9457 Problem Details with
 ```text
 GET /v1/challenge
   200: { "nonce": string, "difficulty": number, "expires_at": ISO8601 }
-  — No auth required. Challenge valid for current + preceding 30-second window
-    (~60 s total). Must be solved before POST /v1/bookings.
+  — Challenge valid for current + preceding 30-second window (~60 s total).
+    Must be solved before POST /v1/bookings.
+  401: missing or invalid DPoP proof (first-load GET grace: 401 not issued
+       for missing proof on very first request before SW has a nonce)
 
 GET /v1/slots?start={ISO8601}&end={ISO8601}
   200: {
@@ -435,6 +504,7 @@ GET /v1/slots?start={ISO8601}&end={ISO8601}
          }
        }
   400: Problem Details — missing start/end
+  401: invalid DPoP proof
   502: Problem Details — CalDAV or auth failure
 
 POST /v1/bookings
@@ -455,6 +525,7 @@ POST /v1/bookings
     }
   }
   400: Problem Details — validation failure, puzzle wrong, or nonce expired
+  401: missing, invalid, or nonce-less DPoP proof (always required for writes)
   409: Problem Details — slot taken
   429: Problem Details — rate limit exceeded
   502: Problem Details — CalDAV or auth failure
@@ -463,6 +534,7 @@ DELETE /v1/bookings/:uid
   Body: { "nonce": string }   // cancellation_nonce returned by POST
   204: (no body) — success
   400: Problem Details — missing or malformed nonce
+  401: missing, invalid, or nonce-less DPoP proof (always required for writes)
   403: Problem Details — nonce does not match stored hash
   404: Problem Details — booking not found
   502: Problem Details — CalDAV or auth failure
@@ -471,10 +543,12 @@ OPTIONS /*
   204: CORS preflight
 
 CORS headers emitted on all responses:
-  Access-Control-Allow-Origin: http://localhost:5173 (dev)
-                               https://bookings.pnr.iki.fi (prod)
-  Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS
-  Access-Control-Allow-Headers: Content-Type
+  Access-Control-Allow-Origin:   http://localhost:5173 (dev)
+                                 https://bookings.pnr.iki.fi (prod)
+  Access-Control-Allow-Methods:  GET, POST, DELETE, OPTIONS
+  Access-Control-Allow-Headers:  Content-Type, DPoP
+  Access-Control-Expose-Headers: DPoP-Nonce
+  DPoP-Nonce: <nonce>            (on all /v1/* responses; cache for next proof)
 ```
 
 All other methods and paths return `405` or `404` Problem Details.
@@ -561,10 +635,12 @@ GOOGLE_REFRESH_TOKEN=...
 CALDAV_CALENDAR_URL=https://apidata.googleusercontent.com/caldav/v2/{calId}/events/
 WORKER_NONCE_SECRET=<openssl rand -base64 32>
 WORKER_PUZZLE_SECRET=<openssl rand -base64 32>
+WORKER_DPOP_SECRET=<openssl rand -base64 32>
 ```
 
-`SLOT_MINUTES`, `PUZZLE_DIFFICULTY`, and `PUZZLE_WINDOW_SECONDS` are set in
-`worker/wrangler.toml [vars]` and are picked up automatically by `wrangler dev`.
+`SLOT_MINUTES`, `PUZZLE_DIFFICULTY`, `PUZZLE_WINDOW_SECONDS`, and
+`DPOP_WINDOW_SECONDS` are set in `worker/wrangler.toml [vars]` and are picked
+up automatically by `wrangler dev`.
 
 ### Production — secrets (`wrangler secret put`)
 
@@ -573,11 +649,14 @@ GOOGLE_SERVICE_ACCOUNT_JSON   (pipe from file — do not paste interactively)
 CALDAV_CALENDAR_URL
 WORKER_NONCE_SECRET
 WORKER_PUZZLE_SECRET
+WORKER_DPOP_SECRET
 ```
 
 Rotating `WORKER_NONCE_SECRET` invalidates all existing `cancellation_nonce`
 values stored in customers' `localStorage`; outstanding bookings can still be
-cancelled by the operator via their CalDAV client.
+cancelled by the operator via their CalDAV client. Rotating `WORKER_DPOP_SECRET`
+invalidates outstanding DPoP nonces; browsers re-establish a valid nonce on the
+next request (transparent to users).
 
 ### Production — `wrangler.toml [vars]` (committed, visible)
 
@@ -586,6 +665,7 @@ cancelled by the operator via their CalDAV client.
 SLOT_MINUTES          = "30"
 PUZZLE_DIFFICULTY     = "10"
 PUZZLE_WINDOW_SECONDS = "30"
+DPOP_WINDOW_SECONDS   = "30"
 
 [[rate_limiting]]
 binding      = "BOOKING_RL"
@@ -606,7 +686,7 @@ VITE_WORKER_URL=https://booking-worker.pekka-nikander.workers.dev
 Injected via GitHub Actions workflow env at build time. Falls back to
 `http://localhost:8787` when the env var is unset (local dev).
 
-### Live URLs (Stage 4)
+### Live URLs (Stage 5)
 
 ```text
 Frontend: https://bookings.pnr.iki.fi
@@ -617,27 +697,53 @@ Worker:   https://booking-worker.pekka-nikander.workers.dev
 
 ## 10. Long-term direction — informative
 
-The current design (SPA + thin Worker + CalDAV backend) reflects the present-day constraints of the web platform rather than an ideal architecture.
+The current design (SPA + thin Worker + CalDAV backend) reflects 
+the present-day constraints of the web platform rather than an ideal architecture.
 
-In particular, the browser cannot safely hold long-lived credentials or call third-party APIs directly in a general way. Cross-origin restrictions (CORS), the use of bearer tokens, and the lack of fine-grained delegation mechanisms mean that even simple integrations typically require a small server-side component to hold secrets and mediate requests.
+In particular, the browser cannot safely hold long-lived credentials or 
+call third-party APIs directly in a general way. 
+Cross-origin restrictions (CORS), the use of bearer tokens, and 
+the lack of fine-grained delegation mechanisms mean that 
+even simple integrations typically require a small server-side component 
+to hold secrets and mediate requests.
 
-The Worker in this design plays exactly that role: it is a minimal bridge that translates a simple JSON API into CalDAV operations and holds the necessary credentials. This is intentionally kept as small and stateless as possible.
+The Worker in this design plays exactly that role: 
+it is a minimal bridge that translates a simple JSON API into CalDAV operations 
+and holds the necessary credentials. 
+This is intentionally kept as small and stateless as possible.
 
-A plausible long-term direction for the web would reduce or eliminate the need for such bridges. The building blocks for this are emerging, but not yet integrated:
+A plausible long-term direction for the web would reduce or eliminate the need for such bridges. 
+The building blocks for this are emerging, but not yet integrated:
 
 - Passkeys / WebAuthn provide device-bound cryptographic identities in the browser.
-- OAuth evolution (including proof-of-possession approaches such as DPoP) points toward access tokens bound to client-held keys rather than bearer tokens.
-- Device attestation mechanisms (including work around ACME device attestation) explore how devices can prove properties about themselves and obtain credentials.
+- OAuth evolution (including proof-of-possession approaches such as DPoP) points 
+  toward access tokens bound to client-held keys rather than bearer tokens.
+- Device attestation mechanisms (including work around ACME device attestation) 
+  explore how devices can prove properties about themselves and obtain credentials.
 
-Taken together, these suggest a future in which a browser could hold a device-bound key and receive narrowly scoped, verifiable capabilities that can be used directly against service APIs without an intermediary server.
+Taken together, these suggest a future in which 
+a browser could hold a device-bound key and receive narrowly scoped, 
+verifiable capabilities that can be used directly against service APIs without an intermediary server.
 
-This project does not attempt to implement such a system. Instead, it adopts a pragmatic intermediate step:
+This project does not attempt to implement such a system. 
+Instead, it adopts a pragmatic intermediate step:
 
 - keep the frontend simple and static,
 - centralise authority in a very small Worker component,
 - use open protocols (CalDAV, iCalendar) for persistence,
 - and expose a narrow, well-defined domain API.
 
-In that sense, the current architecture can be seen as a “baby step” toward a more direct and composable web, where the role of the Worker could eventually shrink further or disappear as the underlying standards evolve.
+In that sense, the current architecture can be seen as a “baby step” 
+toward a more direct and composable web, 
+where the role of the Worker could eventually shrink further or disappear as the underlying standards evolve.
 
-A potential next baby step might be to implement DPoP in a separate service worker for the SPA, protecting the traffic between the browser and the Cloudflare worker.  Filip Skokan's (panva), the author of jose, has a Github repo https://github.com/panva/dpop that could be very useful here.
+Spike 2 (this spike) Stage 5 took that baby step: 
+a Service Worker now generates a session-bound EC P-256 key pair, signs a DPoP proof per request, 
+and the Worker validates it using `panva/jose`. 
+The `panva/dpop` library was evaluated but not used on the frontend — 
+the proof structure is simple enough for raw Web Crypto, and 
+keeping the Service Worker dependency-free is consistent with the project's minimal-deps principle. 
+A notable implementation finding: Web Crypto's `extractable: false`
+applies to both keys in a generated pair, so obtaining a non-extractable private
+key with an accessible public JWK requires generating extractable, exporting the
+public JWK, then re-importing the private key bytes as non-extractable.

@@ -80,7 +80,9 @@ that from browser TypeScript is impractical without a large dependency.
 Stage 1 — Research & Architecture   (Claude Code) — Done
 Stage 2 — Local Spike               (Claude Code + operator config) — Done
 Stage 3 — GitHub Pages Deploy       (Claude Code + operator config) — Done
-Stage 4 — Production / Portability  (post-spike, plan refined then)
+Stage 4 — Security Hardening        (Claude Code + operator config) — Done
+Stage 5 — DPoP Spike                (Claude Code) — Done
+Stage 6 — Production / Portability  (post-spike, plan to be detailed)
 ```
 
 ---
@@ -391,44 +393,75 @@ Implements the scheme described in `ARCHITECTURE.md §3a`.
 `WORKER_NONCE_SECRET` is a separate but similar secret `WORKER_PUZZLE_SECRET`.
 The same comments apply.
 
-## Stage 5 — DPoP Spike (sketch)
+## Stage 5 — DPoP Spike — Done
 
 **Goal:** Bind requests from the browser to a session-held key pair, adding
 per-request signing cost and laying the foundation for eventual device
-attestation. This stage is exploratory; the design may change based on
-findings.
+attestation.
 
-### Motivation
+### What was done
 
-DPoP (RFC 9449) canonically binds OAuth access tokens to a client key. Here
-there is no access token, so DPoP degrades to signed proof-of-key-possession
-per client. The immediate security value is modest (any browser can generate
-a key pair); the value is architectural: when device attestation arrives there
-is a defined place to wire it in, and each layer (PoW from Stage 4, DPoP
-signing, attestation) taxes a different client resource.
+- **`frontend/src/sw.ts`** (new) — Service Worker: generates a non-extractable
+  EC P-256 key pair on first activation, persists `{ privateKey, publicJwk }` in
+  IndexedDB (`"dpop-keys"` store), intercepts all fetch calls to the Worker origin,
+  and attaches a signed `DPoP` proof header to each request. The Service Worker
+  caches the `DPoP-Nonce` value from responses and includes it as the `nonce`
+  claim in subsequent proofs. Built with raw Web Crypto only — no npm dependency.
+- **`worker/src/dpop.ts`** (new) — Worker-side DPoP validation using
+  `jose.jwtVerify` + `EmbeddedJWK`. Returns a typed result distinguishing
+  `ok`, `missing`, and `invalid`. Also provides `generateDpopNonce` (reuses
+  the HMAC-over-time-window scheme from `puzzle.ts`, separate secret
+  `WORKER_DPOP_SECRET`).
+- **`worker/src/index.ts`** — DPoP validation block runs before every `/v1/*`
+  route. Policy: GET requests tolerate a missing proof on first page load (SW
+  not yet active); POST and DELETE always require a proof with a valid nonce.
+  All responses carry `DPoP-Nonce`. CORS headers updated to expose `DPoP` and
+  `DPoP-Nonce`.
+- **`frontend/src/main.ts`** — `waitForServiceWorker()` gates `initCalendar`
+  until the SW is controlling the page. SW calls `clients.claim()` on activate
+  so the wait resolves as quickly as possible.
+- **`frontend/vite.config.ts`** — SW added as a separate Rollup entry
+  (`src/sw.ts → sw.js`); `__WORKER_URL__` injected via Vite `define` (avoids
+  `import.meta.env` which is unavailable in SW bundles).
+- **`jose ^5.0.0`** added to `worker/package.json`.
+- New secret `WORKER_DPOP_SECRET`; new var `DPOP_WINDOW_SECONDS = "30"`.
 
-### Sketch
+### Key findings from this stage
 
-- **Service Worker** (`frontend/src/sw.ts` and `frontend/src/dpop.ts` if needed): 
-  generates a non-extractable EC P-256 key pair on first activation, 
-  persists it in IndexedDB, intercepts all fetch calls to the Worker URL, 
-  and attaches a `DPoP` proof header to each request. 
-  Proof construction follows Github `panva/dpop` or equivalent Web
-  Crypto implementation.
-- **Worker DPoP validation** (`worker/src/dpop.ts`): validates the `DPoP`
-  header on incoming requests using `panva/jose` (already Workers-compatible).
-  Checks `htm`, `htu`, `iat`, `jti` claims. Issues `DPoP-Nonce` using the
-  same stateless HMAC-over-time-window scheme as Stage 4 challenges.
-- **Dependencies**: `panva/jose` added to Worker; no new frontend library
-  (Web Crypto used directly, or `panva/dpop` if it runs cleanly in a SW
-  context — compatibility to be verified during spike).
-- **Key questions to answer during spike**: Does `panva/dpop` work in a
-  Cloudflare Worker and in a browser Service Worker without modification? What
-  is the correct failure mode when the SW is not yet activated (first page
-  load)?
+**`panva/dpop` not needed.** The library was evaluated but not used. The DPoP
+proof JWT structure is simple enough for raw Web Crypto. Keeping the Service
+Worker dependency-free is consistent with the project's minimal-deps principle.
+`panva/jose` is used on the Worker side and is well-justified.
 
-**Checkpoint 5** — all Worker API calls carry a valid DPoP proof; requests
-without one are rejected; key survives page reload.
+**Non-extractable key + JWK header conflict.** Web Crypto's `extractable: false`
+prevents `exportKey()` on both keys in a generated pair. Yet the DPoP JOSE header
+must embed the public key as JWK. Solution: generate with `extractable: true`,
+export the public JWK once, re-import the private key bytes with
+`extractable: false`. Raw private material is in memory only during initialisation.
+
+**`jti` uniqueness cannot be enforced statelessly.** The `jti` claim is present
+(spec compliance), but uniqueness is not checked — a stateless Worker has no store
+for seen jtis without KV. Replay resistance comes from `iat` freshness (60 s
+`maxTokenAge`) and DPoP-Nonce rotation (30 s windows). Documented conscious choice.
+
+**Proactive DPoP-Nonce is simpler than reactive.** RFC 9449 §8 describes a
+reactive flow (server rejects with 401, client retries with nonce). Proactive
+(server sends nonce in every response; client caches and includes it in the next
+proof) avoids retry complexity in the Service Worker fetch handler. First request
+per session has no nonce; the Worker accepts it for GET and rejects for POST/DELETE.
+
+**CORS preflight for `DPoP` header.** Adding any non-simple header to
+cross-origin requests triggers a preflight. `Access-Control-Allow-Headers` must
+include `DPoP`; omitting it silently breaks all requests in production (CORS is
+browser-enforced, so `wrangler dev` does not expose the issue).
+
+**`import.meta.env` unavailable in Service Worker bundles.** Vite's
+`import.meta.env.VITE_*` replacement works in the main bundle but not in a
+separately bundled SW entry. The `define: { __WORKER_URL__: ... }` config option
+works for all entry points.
+
+**Checkpoint 5** — all Worker API calls carry a valid DPoP proof; POST/DELETE
+without one are rejected with 401; key survives page reload.
 
 ---
 

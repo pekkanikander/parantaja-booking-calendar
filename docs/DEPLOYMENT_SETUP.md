@@ -75,10 +75,12 @@ npx wrangler secret put CALDAV_CALENDAR_URL
 # Generate and upload in one step — never store these values anywhere
 openssl rand -base64 32 | npx wrangler secret put WORKER_NONCE_SECRET
 openssl rand -base64 32 | npx wrangler secret put WORKER_PUZZLE_SECRET
+openssl rand -base64 32 | npx wrangler secret put WORKER_DPOP_SECRET
 ```
 
 `WORKER_NONCE_SECRET` — used to HMAC-sign cancellation nonces stored in booking events.  
-`WORKER_PUZZLE_SECRET` — used to HMAC-sign proof-of-work challenges issued to browsers.
+`WORKER_PUZZLE_SECRET` — used to HMAC-sign proof-of-work challenges issued to browsers.  
+`WORKER_DPOP_SECRET` — used to HMAC-sign DPoP-Nonce values sent to browsers (Stage 5).
 
 Then whichever Google auth flow you use:
 
@@ -129,6 +131,7 @@ visible in the repository. Edit the file and push to change them:
 | `SLOT_MINUTES` | `30` | Bookable slot duration in minutes |
 | `PUZZLE_DIFFICULTY` | `10` | Leading zero bits required in the proof-of-work solution |
 | `PUZZLE_WINDOW_SECONDS` | `30` | Duration of each PoW challenge time window; a challenge is accepted for the current window plus the preceding one (~60 s total validity) |
+| `DPOP_WINDOW_SECONDS` | `30` | Duration of each DPoP-Nonce time window; same dual-window acceptance policy as PoW challenges |
 
 The rate limit for `POST /v1/bookings` (default: 5 requests per 60 seconds per IP) is
 configured in the `[[rate_limiting]]` block in `wrangler.toml`. It is baked into the
@@ -161,12 +164,13 @@ GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
 
 WORKER_NONCE_SECRET=<output of: openssl rand -base64 32>
 WORKER_PUZZLE_SECRET=<output of: openssl rand -base64 32>
+WORKER_DPOP_SECRET=<output of: openssl rand -base64 32>
 ```
 
 For local dev the security secrets can be any stable random string — they just need
-to be present. The `SLOT_MINUTES`, `PUZZLE_DIFFICULTY`, and `PUZZLE_WINDOW_SECONDS`
-variables are read from `wrangler.toml` by `wrangler dev` automatically; no need to
-duplicate them in `.dev.vars`.
+to be present. The `SLOT_MINUTES`, `PUZZLE_DIFFICULTY`, `PUZZLE_WINDOW_SECONDS`, and
+`DPOP_WINDOW_SECONDS` variables are read from `wrangler.toml` by `wrangler dev`
+automatically; no need to duplicate them in `.dev.vars`.
 
 These values are only used by `wrangler dev`. The deployed worker uses the secrets
 set in §3.3 and the vars set in §3.4.
@@ -181,7 +185,12 @@ set in §3.3 and the vars set in §3.4.
 | Tail live logs | `cd worker && npx wrangler tail` |
 | Update a secret | `cd worker && npx wrangler secret put <NAME>` |
 | List secrets | `cd worker && npx wrangler secret list` |
-| Rotate security secrets | Re-run the `openssl rand … \| wrangler secret put` commands from §3.3; existing bookings' cancellation nonces will be invalidated |
+| Rotate security secrets | Re-run the `openssl rand … \| wrangler secret put …` [^1] commands |
 | Change slot duration / puzzle params | Edit `worker/wrangler.toml` `[vars]`, push to `main` |
 | Change rate limit | Edit `worker/wrangler.toml` `[[rate_limiting]]`, push to `main` |
 | Local dev | `cd worker && npx wrangler dev` + `cd frontend && npm run dev` |
+
+[^1:] Re-run the `openssl rand … \| wrangler secret put …` [^1] commands from [§3.3](#33-set-worker-secrets); 
+rotating `WORKER_NONCE_SECRET` invalidates existing cancellation nonces; 
+rotating `WORKER_DPOP_SECRET` forces browsers to re-establish a DPoP nonce on next request (transparent to users);
+rotating `WORKER_PUZZLE_SECRET` resets ongoing puzzles and may cause browsers to retry.
